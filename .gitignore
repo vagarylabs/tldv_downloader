@@ -143,8 +143,3 @@ CLAUDE.md
 # Credentials and captured traffic — never publish (public repo)
 token.txt
 *.har
-
-# Downloaded artefacts and vendored binaries (repo root only —
-# .vscode/ and .claude/ settings must stay tracked)
-/*.json
-/*.exe

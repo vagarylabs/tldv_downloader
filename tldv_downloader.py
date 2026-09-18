@@ -405,7 +405,10 @@ class TLDVDownloader:
                     success = self.download_with_ffmpeg(downloader['cmd'], source, output_file)
             finally:
                 if cleanup:
-                    Path(cleanup).unlink(missing_ok=True)
+                    try:
+                        Path(cleanup).unlink()
+                    except FileNotFoundError:
+                        pass
 
             if success:
                 print(f"\n🎉 Successfully downloaded: {output_file}")
