@@ -1,0 +1,12 @@
+# Assign every newly opened issue to the org maintainers (org variable ISSUE_TRIAGE_ASSIGNEES).
+name: issue-triage
+on:
+  issues:
+    types: [opened]
+permissions:
+  issues: write
+jobs:
+  triage:
+    uses: vagarylabs/.github/.github/workflows/issue-triage.yml@main
+    with:
+      assignees: ${{ vars.ISSUE_TRIAGE_ASSIGNEES }}
