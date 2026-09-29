@@ -221,8 +221,6 @@ These are real behaviours in the current source, not hypotheticals.
   changes, the tool breaks — it already broke once this way.
 - **Meeting IDs are taken from the last URL path segment** and must be at least 10 characters. URLs
   in another shape will be rejected.
-- **`fleet_stt_client.py` is unrelated to the downloader.** It is not imported by
-  `tldv_downloader.py` and calls an internal service that is not publicly reachable. Ignore it.
 
 Common failures: `Unauthorized: Invalid auth token` means the token expired — get a fresh one.
 `Meeting not found` means the ID is wrong or your account cannot access that meeting.
