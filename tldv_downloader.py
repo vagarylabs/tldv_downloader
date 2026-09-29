@@ -4,14 +4,19 @@ TLDV Video Downloader with N_m3u8DL-RE Support
 Enhanced version with better error handling, filename sanitization, and N_m3u8DL-RE integration
 """
 
+import os
 import re
 import json
 import requests
+import shutil
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+
+from tldv_playlist import PlaylistError, fetch_secured_playlist
 
 
 class TLDVDownloader:
@@ -108,30 +113,42 @@ class TLDVDownloader:
             'full_data': data
         }
 
+    def find_binary(self, name, env_var):
+        """Locate an external binary via env var override, then PATH"""
+        override = os.environ.get(env_var)
+        if override:
+            if Path(override).is_file():
+                return override
+            print(f"⚠️ {env_var} points at {override}, which does not exist — ignoring")
+        return shutil.which(name)
+
     def check_downloader_availability(self):
         """Check if N_m3u8DL-RE or ffmpeg is available"""
         downloaders = [
-            {'name': 'N_m3u8DL-RE', 'cmd': 'N_m3u8DL-RE', 'version_cmd': '--version', 'preferred': True},
-            {'name': 'ffmpeg', 'cmd': 'ffmpeg', 'version_cmd': '--version', 'preferred': False},
-            {'name': 'ffmpeg', 'cmd': 'ffmpeg', 'version_cmd': '-version', 'preferred': False},
+            {'name': 'N_m3u8DL-RE', 'env': 'TLDV_N_M3U8DL', 'version_cmd': '--version', 'preferred': True},
+            {'name': 'ffmpeg', 'env': 'TLDV_FFMPEG', 'version_cmd': '-version', 'preferred': False},
         ]
 
         available = []
         for downloader in downloaders:
+            path = self.find_binary(downloader['name'], downloader['env'])
+            if not path:
+                print(f"❌ {downloader['name']} not found on PATH (override with {downloader['env']})")
+                continue
             try:
                 result = subprocess.run(
-                    [downloader['cmd'], downloader['version_cmd']],
+                    [path, downloader['version_cmd']],
                     capture_output=True,
                     text=True,
                     timeout=10
                 )
                 if result.returncode == 0:
-                    available.append(downloader)
+                    available.append({**downloader, 'cmd': path})
                     print(f"✅ {downloader['name']} is available")
                 else:
                     print(f"❌ {downloader['name']} not working properly")
-            except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-                print(f"❌ {downloader['name']} not found")
+            except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError):
+                print(f"❌ {downloader['name']} not usable")
 
         if not available:
             raise RuntimeError("Neither N_m3u8DL-RE nor ffmpeg is available. Please install one of them.")
@@ -140,32 +157,59 @@ class TLDVDownloader:
         preferred = next((d for d in available if d['preferred']), available[0])
         return preferred
 
-    def download_with_n_m3u8dl_re(self, source_url, output_file):
-        """Download using N_m3u8DL-RE"""
+    def download_with_n_m3u8dl_re(self, binary, source, output_file):
+        """Download using N_m3u8DL-RE
+
+        *source* is either a URL or the path of a local .m3u8 file.
+        """
         command = [
-            'N_m3u8DL-RE',
-            source_url,
+            binary,
+            str(source),
             '--save-name', Path(output_file).stem,
             '--save-dir', str(Path(output_file).parent),
-            '--thread-count', '8',  # Parallel downloads
-            '--download-retry-count', '3',
+            '--thread-count', '16',  # Parallel downloads
+            '--download-retry-count', '5',
             '--auto-select',  # Auto select best quality
             '--no-log'  # Reduce log verbosity
         ]
 
+        # N_m3u8DL-RE shells out to ffmpeg for muxing; hand it the same binary
+        # we resolved ourselves so it does not need ffmpeg on PATH.
+        ffmpeg = self.find_binary('ffmpeg', 'TLDV_FFMPEG')
+        if ffmpeg:
+            command += ['--ffmpeg-binary-path', ffmpeg, '-M', 'format=mp4']
+
         return self._run_download_command(command, output_file)
 
-    def download_with_ffmpeg(self, source_url, output_file):
+    def download_with_ffmpeg(self, binary, source, output_file):
         """Download using ffmpeg"""
         command = [
-            'ffmpeg',
-            '-i', source_url,
+            binary,
+            '-i', str(source),
             '-c', 'copy',
             '-y',  # Overwrite output file
             str(output_file)
         ]
 
         return self._run_download_command(command, output_file)
+
+    def _resolve_output_file(self, output_file):
+        """Find what the downloader actually wrote, and normalise its name
+
+        N_m3u8DL-RE appends ``.MUX`` to the save-name when it muxes after a
+        binary merge, so the file lands as ``<name>.MUX.mp4`` rather than
+        ``<name>.mp4``. Rename it back so callers get the name they asked for.
+        """
+        output_file = Path(output_file)
+        if output_file.exists():
+            return output_file
+
+        muxed = output_file.with_name(f"{output_file.stem}.MUX{output_file.suffix}")
+        if muxed.exists():
+            muxed.replace(output_file)
+            return output_file
+
+        return None
 
     def _run_download_command(self, command, output_file):
         """Run download command with progress tracking"""
@@ -182,8 +226,9 @@ class TLDVDownloader:
             )
 
             if result.returncode == 0:
-                if Path(output_file).exists():
-                    file_size = Path(output_file).stat().st_size
+                produced = self._resolve_output_file(output_file)
+                if produced:
+                    file_size = produced.stat().st_size
                     print(f"✅ Download completed successfully!")
                     print(f"📊 File size: {file_size / (1024 * 1024):.2f} MB")
                     return True
@@ -210,6 +255,33 @@ class TLDVDownloader:
             print(f"💾 Metadata saved: {json_file}")
         except Exception as e:
             print(f"⚠️ Could not save metadata: {e}")
+
+    def resolve_playable_source(self, meeting_id, auth_token, info):
+        """Return ``(source, temp_file_to_clean_up)`` for the downloader
+
+        The preferred source is the secured playlist, written to a temporary
+        local .m3u8 with presigned absolute segment URLs. If that endpoint is
+        unavailable we fall back to the raw URL from the API, which only works
+        while the bucket is public.
+        """
+        print("🔐 Fetching secured playlist...")
+        try:
+            playlist, ttl, segments = fetch_secured_playlist(
+                self.session, meeting_id, auth_token
+            )
+        except PlaylistError as e:
+            print(f"⚠️ Secured playlist unavailable: {e}")
+            print("↩️ Falling back to the raw source URL (expect 403 if the bucket is private)")
+            return info['source_url'], None
+
+        print(f"🧩 {segments} segments, signatures valid for {ttl // 3600}h")
+
+        handle = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.m3u8', delete=False, encoding='utf-8'
+        )
+        with handle as f:
+            f.write(playlist)
+        return handle.name, handle.name
 
     def download_multiple_videos(self, video_data_list, output_dir=None, max_workers=3):
         """Download multiple videos in parallel"""
@@ -321,11 +393,22 @@ class TLDVDownloader:
             metadata_name = f"{info['timestamp']}_{info['name']}"
             self.save_metadata(info['full_data'], output_path / metadata_name)
 
+            # Resolve the actual, downloadable source. The URL in the API
+            # response points at a private bucket and answers 403 on its own.
+            source, cleanup = self.resolve_playable_source(meeting_id, auth_token, info)
+
             # Download video
-            if downloader['name'] == 'N_m3u8DL-RE':
-                success = self.download_with_n_m3u8dl_re(info['source_url'], output_file)
-            else:
-                success = self.download_with_ffmpeg(info['source_url'], output_file)
+            try:
+                if downloader['name'] == 'N_m3u8DL-RE':
+                    success = self.download_with_n_m3u8dl_re(downloader['cmd'], source, output_file)
+                else:
+                    success = self.download_with_ffmpeg(downloader['cmd'], source, output_file)
+            finally:
+                if cleanup:
+                    try:
+                        Path(cleanup).unlink()
+                    except FileNotFoundError:
+                        pass
 
             if success:
                 print(f"\n🎉 Successfully downloaded: {output_file}")

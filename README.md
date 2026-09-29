@@ -38,8 +38,9 @@ account can already access, one URL at a time.
 - **Python 3.7 or newer.** The floor is set by `subprocess.run(capture_output=...)`. CI runs the
   checks on Python 3.11.
 - **`requests`** — the only Python dependency (`requirements.txt` pins `requests==2.34.2`).
-- **N_m3u8DL-RE or FFmpeg**, on your `PATH`. At least one is required; the script exits with
-  `Neither N_m3u8DL-RE nor ffmpeg is available` if it finds neither.
+- **N_m3u8DL-RE or FFmpeg**, on your `PATH` or pointed at by `TLDV_N_M3U8DL` / `TLDV_FFMPEG`. At
+  least one is required; the script exits with `Neither N_m3u8DL-RE nor ffmpeg is available` if it
+  finds neither. Having both is best: N_m3u8DL-RE calls FFmpeg to mux the finished stream.
 
 ## Install
 
@@ -136,10 +137,41 @@ environment.
 
 ## Configuration
 
-There is none. No config file, no environment variables. Everything is answered at the prompts.
+There is no config file — everything else is answered at the prompts. Two optional environment
+variables override the lookup of the external binaries:
 
-The repository ships a `.env.example`, but it is inaccurate — see *Known issues* below. The
-downloader reads no environment variables at all.
+| Variable | Effect |
+|----------|--------|
+| `TLDV_N_M3U8DL` | Full path to the N_m3u8DL-RE executable, instead of searching `PATH`. |
+| `TLDV_FFMPEG` | Full path to the FFmpeg executable, instead of searching `PATH`. |
+
+A value pointing at a file that does not exist is reported and then ignored, falling back to `PATH`.
+
+The repository ships a `.env.example`, but it is inaccurate — see *Known issues* below. No other
+environment variable is read.
+
+## How the download works
+
+The URL in `video.source` — the one the watch-page API returns and that older versions of this tool
+fed straight to the downloader — points at `media-files.tldv.io`, a Wasabi bucket that used to be
+world-readable and is now private. Requesting it unsigned answers `403 AccessDenied`, no matter
+which downloader you use.
+
+So the tool follows the same path the web player takes:
+
+1. `GET https://gaia.tldv.io/v1/meetings/<id>/playlist.m3u8` with the bearer token. Note the host —
+   this endpoint is **not** on the `gw.tldv.io` gateway that serves the watch-page API, which
+   answers `502` for it. The response is a redirect to a short-lived signing service.
+2. The playlist that comes back carries a custom header line,
+   `#TLDVCONF:<ttl-seconds>,<shift>,<base-url>`, and its segment lines are Caesar-shifted.
+3. `tldv_playlist.decode_playlist()` shifts the letters back by `<shift>` and prefixes
+   `<base-url>`, producing presigned absolute segment URLs, valid for `<ttl-seconds>` (48 hours in
+   practice).
+4. The decoded playlist is written to a temporary `.m3u8` and handed to the downloader as a local
+   file. It is deleted once the download finishes.
+
+If step 1 fails the tool falls back to the raw `video.source` URL and says so, which is only useful
+if tldv ever makes the bucket public again.
 
 ## Output
 
@@ -170,12 +202,11 @@ These are real behaviours in the current source, not hypotheticals.
   `Batch download failed!` at the end — even when every download succeeded. Trust the per-file lines
   and the files on disk, not the final message.
 - **No resume.** An interrupted download restarts from zero. The FFmpeg path passes `-y` and
-  overwrites any existing output file. N_m3u8DL-RE is invoked with `--download-retry-count 3`, which
+  overwrites any existing output file. N_m3u8DL-RE is invoked with `--download-retry-count 5`, which
   retries segments within a run but does not resume across runs.
-- **A spurious FFmpeg error appears at startup.** Availability detection probes `ffmpeg --version`
-  before `ffmpeg -version`. The first is not a valid FFmpeg flag, so you will see
-  `ffmpeg not working properly` immediately followed by `ffmpeg is available`. The first line is
-  noise.
+- **The signed playlist expires.** Segment signatures are valid for 48 hours from the moment the
+  playlist is fetched. A download that is paused for longer has to start over with a fresh
+  playlist. The tool prints the remaining validity before it starts.
 - **Metadata is written before the download runs.** A failed or cancelled download still leaves a
   `.json` file behind with no matching `.mp4`.
 - **Parallel output is interleaved.** Each worker prints its own progress and re-runs the backend
@@ -183,9 +214,11 @@ These are real behaviours in the current source, not hypotheticals.
   together.
 - **Downloads time out after one hour.** The per-download subprocess timeout is fixed and not
   configurable.
-- **The API endpoint is undocumented.** The script calls
-  `https://gw.tldv.io/v1/meetings/<id>/watch-page?noTranscript=true`, which is an internal tldv.io
-  endpoint. If it changes, the tool breaks.
+- **The API endpoints are undocumented.** The script calls
+  `https://gw.tldv.io/v1/meetings/<id>/watch-page?noTranscript=true` for the metadata and
+  `https://gaia.tldv.io/v1/meetings/<id>/playlist.m3u8` for the playlist. Both are internal
+  tldv.io endpoints, and the `#TLDVCONF` obfuscation they use is not a stable interface. If either
+  changes, the tool breaks — it already broke once this way.
 - **Meeting IDs are taken from the last URL path segment** and must be at least 10 characters. URLs
   in another shape will be rejected.
 - **`fleet_stt_client.py` is unrelated to the downloader.** It is not imported by

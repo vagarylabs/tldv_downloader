@@ -139,3 +139,7 @@ graphify-out/
 
 # Internal fleet context — must not be published (public repo)
 CLAUDE.md
+
+# Credentials and captured traffic — never publish (public repo)
+token.txt
+*.har
