@@ -22,4 +22,5 @@ jobs:
     with:
       runner: ${{ vars.RUNNER_TYPE || 'ubuntu-latest' }}
       python-version: "3.11"
-    secrets: inherit
+    # No secrets: the called workflow (a public repo outside this org) reads none, and `secrets: inherit` handed it
+    # every repo secret on each push and pull request. Pass a secret explicitly if a step ever needs one.
