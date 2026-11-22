@@ -68,23 +68,32 @@ Verify with `N_m3u8DL-RE --version` or `ffmpeg -version`.
 
 ## Usage
 
-The script is **fully interactive** — it prompts for everything it needs. There are no configuration
-flags. The only recognised argument is help:
+The script can be run in **one-shot mode** (via command-line arguments) or in **interactive mode** (if run without arguments).
 
 ```bash
-python tldv_downloader.py            # run the tool (prompts for everything)
-python tldv_downloader.py --help     # print the auth-token instructions and exit
+# One-shot download (auth token is optional for public meetings!)
+python tldv_downloader.py https://tldv.io/app/meetings/<meeting-id>/
+
+# One-shot with specific output directory and token (if private meeting)
+python tldv_downloader.py https://tldv.io/app/meetings/<meeting-id>/ -o ./recordings -t "Bearer eyJhbGciOi..."
+
+# One-shot batch download from a file
+python tldv_downloader.py -b meetings.txt -o ./recordings -w 4
+
+# Interactive mode (prompts for everything)
+python tldv_downloader.py
+
+# Help & token guide
+python tldv_downloader.py --help
 ```
 
-`-h`, `--help`, and `help` are equivalent, and all three only print the token guide.
-
-### Single download
+### Single download (Interactive)
 
 ```
 $ python tldv_downloader.py
 Batch download mode? (y/N): n
 Enter the TLDV meeting URL: https://tldv.io/app/meetings/681cc00576bb060013e5fbb7
-Enter your Authorization token: Bearer eyJhbGciOi...
+Enter Authorization token (optional for public meetings, press Enter to skip):
 Output directory (press Enter for current):
 Proceed with download? (y/N): y
 ```

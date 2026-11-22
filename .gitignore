@@ -124,6 +124,8 @@ venv/
 
 # Downloaded artifacts
 *.mp4
+*.MUX.mp4
+*_*.json
 
 
 # Tooling output dirs (per memory rule §2.3)
