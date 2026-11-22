@@ -4,6 +4,7 @@ TLDV Video Downloader with N_m3u8DL-RE Support
 Enhanced version with better error handling, filename sanitization, and N_m3u8DL-RE integration
 """
 
+import argparse
 import os
 import re
 import json
@@ -53,30 +54,60 @@ class TLDVDownloader:
 
     def prepare_auth_token(self, token):
         """Ensure auth token has Bearer prefix if needed"""
+        if not token:
+            return None
         token = token.strip()
+        if not token:
+            return None
         if not token.startswith('Bearer ') and not token.startswith('bearer '):
             token = f"Bearer {token}"
         return token
 
-    def fetch_meeting_data(self, meeting_id, auth_token):
+    def fetch_meeting_data(self, meeting_id, auth_token=None):
         """Fetch meeting data from TLDV API"""
-        api_url = f"https://gw.tldv.io/v1/meetings/{meeting_id}/watch-page?noTranscript=true"
-
+        # First attempt: modern gaia endpoint (works without auth for public meetings)
+        gaia_url = f"https://gaia.tldv.io/v1/meetings/{meeting_id}"
         headers = {
-            "Authorization": auth_token,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-Tldv-Client": "tldv-webapp/1.0.0"
+        }
+        if auth_token:
+            headers["Authorization"] = auth_token
+
+        try:
+            response = self.session.get(gaia_url, headers=headers, timeout=30)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code in (401, 403):
+                if not auth_token:
+                    raise ValueError(
+                        "Unauthorized: This meeting is private and requires an Authorization token. "
+                        "Run with --help for instructions on how to get one."
+                    )
+                else:
+                    raise ValueError("Unauthorized: Invalid or expired auth token")
+        except requests.exceptions.RequestException:
+            pass
+
+        # Fallback: legacy watch-page endpoint on gw.tldv.io
+        api_url = f"https://gw.tldv.io/v1/meetings/{meeting_id}/watch-page?noTranscript=true"
+        legacy_headers = {
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
+        if auth_token:
+            legacy_headers["Authorization"] = auth_token
 
         try:
-            response = self.session.get(api_url, headers=headers, timeout=30)
+            response = self.session.get(api_url, headers=legacy_headers, timeout=30)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
-            if response.status_code == 401:
-                raise ValueError("Unauthorized: Invalid auth token") from e
+            if response.status_code in (401, 403):
+                raise ValueError("Unauthorized: Invalid or missing auth token") from e
             elif response.status_code == 404:
-                raise ValueError("Meeting not found") from e
+                raise ValueError(f"Meeting not found (ID: {meeting_id})") from e
             else:
                 raise ValueError(f"API error: {e}") from e
         except requests.exceptions.RequestException as e:
@@ -89,10 +120,7 @@ class TLDVDownloader:
 
         name = meeting.get("name", "TLDV_Meeting")
         created_at = meeting.get("createdAt")
-        source_url = video.get("source")
-
-        if not source_url:
-            raise ValueError("Video source URL not found in meeting data")
+        source_url = video.get("source") if video else None
 
         # Parse date
         try:
@@ -270,9 +298,11 @@ class TLDVDownloader:
                 self.session, meeting_id, auth_token
             )
         except PlaylistError as e:
-            print(f"⚠️ Secured playlist unavailable: {e}")
-            print("↩️ Falling back to the raw source URL (expect 403 if the bucket is private)")
-            return info['source_url'], None
+            if info.get('source_url'):
+                print(f"⚠️ Secured playlist unavailable: {e}")
+                print("↩️ Falling back to the raw source URL (expect 403 if the bucket is private)")
+                return info['source_url'], None
+            raise ValueError(f"Could not retrieve playable stream: {e}") from e
 
         print(f"🧩 {segments} segments, signatures valid for {ttl // 3600}h")
 
@@ -355,7 +385,7 @@ class TLDVDownloader:
             for download in failed_downloads:
                 print(f"   ❌ {download['url']}: {download['error']}")
 
-    def download_video(self, url, auth_token, output_dir=None):
+    def download_video(self, url, auth_token=None, output_dir=None):
         """Main download function"""
         try:
             # Setup output directory
@@ -471,13 +501,53 @@ def main():
     print("🎬 TLDV Video Downloader with N_m3u8DL-RE Support")
     print("=" * 55)
 
+    parser = argparse.ArgumentParser(
+        description="Download TLDV meeting recordings to MP4.",
+        add_help=False
+    )
+    parser.add_argument('url', nargs='?', help="TLDV meeting URL to download (one-shot mode)")
+    parser.add_argument('-o', '--output-dir', dest='output_dir', help="Output directory for downloaded video and metadata")
+    parser.add_argument('-t', '--token', dest='token', help="Authorization token (optional for public meetings)")
+    parser.add_argument('-b', '--batch', dest='batch_file', help="Path to text file containing meeting URLs")
+    parser.add_argument('-w', '--workers', dest='workers', type=int, default=3, help="Number of parallel downloads in batch mode (1-8, default 3)")
+    parser.add_argument('-h', '--help', action='store_true', help="Show help and auth token instructions")
+
+    args, _ = parser.parse_known_args()
+
     # Check if help is requested
-    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help', 'help']:
+    if args.help or (len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help', 'help']):
         print_instructions()
+        parser.print_help()
         return
 
     downloader = TLDVDownloader()
 
+    # Case 1: One-shot single URL passed via CLI
+    if args.url:
+        print(f"\n🚀 One-shot download: {args.url}")
+        result = downloader.download_video(args.url, args.token, args.output_dir)
+        if result:
+            print(f"\n🎉 All done! Video saved to: {result}")
+        else:
+            print("\n💥 Download failed!")
+            sys.exit(1)
+        return
+
+    # Case 2: Batch file passed via CLI
+    if args.batch_file:
+        urls = parse_urls_from_file(args.batch_file)
+        if not urls:
+            print(f"❌ No valid URLs found in {args.batch_file}")
+            sys.exit(1)
+        workers = max(1, min(8, args.workers))
+        video_data_list = [(u, args.token) for u in urls]
+        print(f"\n🚀 One-shot batch download: {len(urls)} videos ({workers} workers)")
+        results = downloader.download_multiple_videos(video_data_list, args.output_dir, workers)
+        if not results:
+            sys.exit(1)
+        return
+
+    # Case 3: Interactive mode (no CLI arguments)
     try:
         # Check if batch mode is requested
         batch_mode = input("\n📋 Batch download mode? (y/N): ").strip().lower() == 'y'
@@ -513,20 +583,15 @@ def main():
 
             print(f"\n📊 Found {len(urls)} URLs to download")
 
-            # Get auth token (same for all downloads in session)
+            # Get auth token (optional for public meetings)
             print("\n" + "=" * 55)
             print("🔑 Need help getting the auth token? Run with --help flag")
             print("=" * 55)
 
-            auth_token = input("\n🔐 Enter your Authorization token: ").strip()
-            if not auth_token:
-                print("❌ Authorization token is required!")
-                return
+            auth_token = input("\n🔐 Enter Authorization token (optional for public meetings, press Enter to skip): ").strip() or None
 
             # Optional output directory
-            output_dir = input("\n📁 Output directory (press Enter for current): ").strip()
-            if not output_dir:
-                output_dir = None
+            output_dir = input("\n📁 Output directory (press Enter for current): ").strip() or None
 
             # Parallel workers
             max_workers = input(f"\n🔧 Number of parallel downloads (1-8, default 3): ").strip()
@@ -559,7 +624,7 @@ def main():
                 print("\n💥 Batch download failed!")
 
         else:
-            # Single download mode (original behavior)
+            # Single download mode
             url = input("\n📎 Enter the TLDV meeting URL: ").strip()
             if not url:
                 print("❌ URL cannot be empty!")
@@ -570,15 +635,10 @@ def main():
             print("🔑 Need help getting the auth token? Run with --help flag")
             print("=" * 55)
 
-            auth_token = input("\n🔐 Enter your Authorization token: ").strip()
-            if not auth_token:
-                print("❌ Authorization token is required!")
-                return
+            auth_token = input("\n🔐 Enter Authorization token (optional for public meetings, press Enter to skip): ").strip() or None
 
             # Optional output directory
-            output_dir = input("\n📁 Output directory (press Enter for current): ").strip()
-            if not output_dir:
-                output_dir = None
+            output_dir = input("\n📁 Output directory (press Enter for current): ").strip() or None
 
             # Confirm before download
             print(f"\n📋 Ready to download:")

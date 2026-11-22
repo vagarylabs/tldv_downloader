@@ -95,7 +95,7 @@ def decode_playlist(playlist_text):
     return '\n'.join(lines) + '\n', ttl, segment_count
 
 
-def fetch_secured_playlist(session, meeting_id, auth_token, timeout=60):
+def fetch_secured_playlist(session, meeting_id, auth_token=None, timeout=60):
     """Fetch and decode the secured playlist for *meeting_id*.
 
     Note the host: this endpoint lives on ``gaia.tldv.io``, not on the
@@ -104,10 +104,11 @@ def fetch_secured_playlist(session, meeting_id, auth_token, timeout=60):
     """
     url = f"{GAIA_BASE_URL}/v1/meetings/{meeting_id}/playlist.m3u8"
     headers = {
-        "Authorization": auth_token,
         "X-Tldv-Client": CLIENT_HEADER,
         "Accept": "*/*",
     }
+    if auth_token:
+        headers["Authorization"] = auth_token
 
     try:
         # The first response is a 302 to a short-lived signing service.
